@@ -52,6 +52,7 @@ scores above are exactly what the grader will compute. Failure analysis:
 | **Aryan Chourasia** | Team Leader, B.Tech 3rd Year | achourasia_be24@thapar.edu |
 | **Govinda Podder** | Member | gpodder_be24@thapar.edu |
 | **Ashish Bajaj** | Member | kashish_be24@thapar.edu |
+| **Devaansh Gupta** | Member | devaanshgupta2006@gmail.com |
 
 Thapar Institute of Engineering and Technology, Patiala.
 
@@ -69,9 +70,20 @@ thermal drift, vibration and stage backlash have thrown off its navigation.
 | Field of view | 1 µm | 10 µm |
 | Image size | 1000 × 1000 | 1000 × 1000 |
 
-The scale gap is exactly **10×**, so the reference's true footprint inside the
-search image is exactly **100 × 100 px — 1 % of its area**. Two consequences
-drive the whole design:
+In **Phase 1** the scale gap was given as exactly **10×**, so the reference's
+footprint inside the search image was exactly 100 × 100 px — 1 % of its area.
+**Phase 2 removes that certainty**, which is the whole difficulty of this
+submission:
+
+| | Phase 1 | **Phase 2 (this submission)** |
+|---|---|---|
+| Zoom | exactly 10× (given) | **unknown, uniform in [8×, 12×]** |
+| Rotation | injected as noise | **unknown ±5° — and must be reported** |
+| Reference present? | always | **~20 % of pairs contain no true instance** |
+| Required output | `x, y` | **`x, y, theta, scale, found, score`** |
+
+So the footprint is now anywhere between 83 × 83 and 125 × 125 px, at an unknown
+angle, and may not be there at all. Two consequences drive the whole design:
 
 1. **A naive `matchTemplate` cannot even run.** The template is physically
    larger than the image it is searched in. It must be rescaled first, and the
@@ -84,8 +96,15 @@ When several near-identical sites match (dense DRAM and fin arrays are periodic
 by construction), the answer is the one **closest to the search-image centre** —
 the stage-accuracy prior: the tool is lost, but not *that* lost.
 
-**Metric:** Euclidean distance to ground truth, scored as accuracy within 5 px.
-Computation time is a secondary tie-break.
+**Metric (Phase 2, 100 pts + 10 bonus).** Localization 40 — tiered credit on
+Euclidean error at 1 / 2 / 3 / 5 px, weighted 0.45·A + 0.55·B. Pose 20 — scale 10
++ rotation 10, scored **only where localization already succeeded**. Rejection 15
+— F1 on the `found` flag across all 180 grayscale pairs. Calibration 10 — AUC of
+`score` against per-pair correctness. Efficiency 5. Generator, citations and
+failure analysis 10. Bonus: +6 for Set D (optical RGB), +4 for rejection F1 ≥ 0.90.
+
+*(Phase 1's metric — plain accuracy within 5 px — is what the §2 numbers below
+are measured against.)*
 
 ---
 
@@ -197,8 +216,31 @@ experiment. None are used by `register.py`.
 
 ## 4. How it works
 
-The submission is **DriftRoute**: one function, two matchers, dispatched per
-pair by a measured criterion.
+The declared architecture is **DriftRoute**: one function, two matchers
+(classical `DriftFind` + learned `DriftMatchNet`), dispatched per pair.
+
+> **⚠️ What actually ships in Phase 2 — read this before the diagram.**
+> `route.predict_full(..., use_net_xy=False)` is the default, so the **classical
+> path supplies all six output columns** (`x, y, theta, scale, found, score`).
+> The network stays wired into the router — DriftRoute is still the declared
+> approach, and `use_net_xy=True` restores the Phase 1 behaviour — but it is
+> **off by default because it was measured to lose, not assumed to**:
+>
+> | On the organizers' real 20-pair sample | Localization /40 | Site found ≤5 px |
+> |---|---|---|
+> | **Classical (shipped)** | **35.60** | **15 / 16** |
+> | CNN trained on our generator | 13.35 | 7 / 16 |
+> | CNN retrained on *their* generator | 28.78 | 15 / 16 |
+>
+> The net had overfit our synthetic textures. Retraining on the organizers' own
+> generator source (new seeds) more than doubled its real-data score — confirming
+> the diagnosis — but classical still won on **sub-pixel precision**, which the
+> tiered metric pays for. Full derivation in
+> [`failure_analysis.pdf`](failure_analysis.pdf) §4.1. Turning the net off also
+> removes a per-pair forward pass from the CPU-only budget.
+
+**The diagram below describes the Phase 1 routing**, kept because it is the
+architecture Phase 2 extends:
 
 ```
                        reference (1000×1000)   search (1000×1000)
@@ -235,18 +277,31 @@ forward pass is reused** — routing costs nothing extra.
 
 Pure numpy/scipy, deterministic, no GPU.
 
-1. **Rescale by block-averaging.** The reference is downsampled 10× to a
-   100 × 100 stamp — averaging each 10 × 10 block, which is what the wide
-   detector physically does. Not interpolation.
+1. **Rescale by block-averaging — over a searched scale, not a given one.**
+   The reference is downsampled by averaging blocks, which is what the wide
+   detector physically does (not interpolation). Phase 1 knew the factor was 10;
+   **Phase 2 searches it**: `PHASE2_SCALES` sweeps 8.0 → 12.0 in 0.5 steps
+   (9 candidates, stamp sizes 125 → 83 px), and the winner is refined by
+   golden-section to a continuous value. Median scale error after refinement:
+   **0.62 %**.
 2. **FFT normalised cross-correlation.** NCC measures *shape* agreement
    independent of brightness and contrast, so it is unbothered by the wide
    view being darker and noisier. Computed the fast way (Lewis, 1995): the
    numerator by FFT, the local image statistics by FFT with a box kernel, so a
    100 × 100 stamp over a 1000 × 1000 image costs milliseconds.
 3. **Blur and rotation search.** The wide view is defocused while the shrunk
-   reference is sharp, so a sharp stamp systematically under-matches. The stamp
-   is tried at 4 blur levels (0–3 px) × 5 angles (±4°), bracketing the tilt the
-   evaluator described in the webinar.
+   reference is sharp, so a sharp stamp systematically under-matches. For
+   Phase 2 the angle grid is `PHASE2_ANGLES` = −5° → +5° in 2.5° steps, covering
+   the full disclosed range, and the recovered angle is reported as `theta`
+   (`THETA_SIGN = +1.0`, CCW-positive — verified against the organizers' own
+   ground truth, 10/10).
+   **The p008 fix lives here.** The cheap scale-ranking scan originally evaluated
+   every candidate zoom **at angle 0 only**, while the pipeline searched ±5°. On a
+   rotated pair the wrong zoom therefore won the ranking and every later stage
+   inherited it — we failed a Set-A pair the organizers' own ZNCC baseline solved.
+   Setting `SCAN_ANGLES = PHASE2_ANGLES` (scan the same range the pipeline
+   searches) took localization **29.70 → 35.60 / 40**, with Set A rising to a
+   perfect 1.000. See [`failure_analysis.pdf`](failure_analysis.pdf) §2.1.
 4. **Coarse-to-fine.** The (blur, angle) setting is chosen on a half-resolution
    pass; only the winner is re-correlated at full resolution.
 5. **Centre-prior tie-break.** Among local maxima, the winner maximises
@@ -364,7 +419,7 @@ then render it with defined, known amounts of each artefact: edge-effect
 detector noise, line-edge roughness, vignette, gamma and barrel distortion.
 
 Every parameter, its physical range and its literature source are recorded in
-[`docs/GENERATOR_SPEC.md`](docs/GENERATOR_SPEC.md) — a **24-source citation
+[`docs/GENERATOR_SPEC.md`](docs/GENERATOR_SPEC.md) — a **32-source citation
 ledger**. Corrections made after the organizers' webinar (notably that our
 stage-rotation range was 10–20× too small) are tracked separately in
 [`docs/WEBINAR_CORRECTIONS.md`](docs/WEBINAR_CORRECTIONS.md), with quotes.
@@ -469,6 +524,29 @@ Full image sets for `eval200` and `train` are published as **release
 
 ## 7. Reproducing the numbers
 
+### Phase 2 — the headline table at the top of this README
+
+Scored under the exact rubric against the organizers' withheld ground truth.
+Their 20-pair sample is **not** redistributed here (it is their material), so
+point `--data` at your own copy:
+
+```bash
+# the shipped classical configuration -> localization 35.60/40, rejection F1 0.968
+python scripts/eval_organizer.py --data data/organizer_sample
+
+# the same sample with the net supplying x,y -> 13.35/40 (the measured regression)
+python scripts/eval_organizer.py --data data/organizer_sample --use-net-xy
+```
+
+To score any generated set under the full Phase 2 rubric (localization, pose,
+rejection, calibration):
+
+```bash
+python scripts/score_phase2.py <dataset-dir>     # dir with labels.csv + images/
+```
+
+### Phase 1 (provenance)
+
 ```bash
 # classical
 python scripts/eval_solver.py data/eval200
@@ -525,7 +603,36 @@ bought overfitting rather than accuracy.
 
 ## 9. Failure cases and honest limitations
 
-Where this still breaks, and why:
+Where this still breaks, and why. The two-page
+[`failure_analysis.pdf`](failure_analysis.pdf) is the full, measured version of
+this section — everything below is a summary of it.
+
+### Phase 2 — the current limitations
+
+1. **The severity-4 rejection cliff — the dominant remaining loss.** At the
+   highest degradation level, dose and noise crush the true-match peak below
+   `FOUND_PEAK = 0.53`, so the pair is declared absent. Measured on the
+   organizers' own generator: **17/19 (89 %)** of severity-4 present pairs are
+   false-rejected, and 8/28 at severity 3. Localization at severity 4 is still
+   sub-pixel — **the coordinate was right and we threw it away**, because the
+   output contract zeros the pose columns when `found = 0`, so a false reject
+   forfeits *both* its localization and its pose credit.
+   The cause is structural, not a mis-set number: **one scalar threshold cannot
+   simultaneously reject periodic absent decoys (wants it high) and accept
+   crushed present peaks (wants it low)** — the distributions overlap. The honest
+   fix is a severity-aware presence signal, not a different scalar. We
+   deliberately did **not** retune the threshold against the 20 validation pairs.
+2. **Generator fidelity — the limitation underneath the others.** Our present-pair
+   degradation is still too mild: ~4 % of our present pairs fall below peak 0.55
+   against roughly 50 % in the organizers' sample. Our synthetic errors are
+   dominated by confident mislocalizations; theirs by low-confidence rejections.
+   That mismatch is why a signal tuned on our data can invert on theirs — it is
+   what we would fix first with more time.
+3. **Calibration remains the weakest scored bucket** (AUC 0.789 on their sample).
+   A richer candidate signal gained 0.21 AUC on our data and **lost 0.26 on
+   theirs**, so it was measured and rejected rather than shipped.
+
+### Phase 1 limitations (provenance — measured under Phase 1 conditions)
 
 1. **Dense periodic arrays with a weak unique landmark (~6 % of the default
    set).** When every candidate site is genuinely near-identical, the centre
@@ -546,19 +653,24 @@ Where this still breaks, and why:
    (75.0 % / 56.3 %). It is retained for the multi-match case, for machines
    without a GPU, and as a guarantee against total failure — not because it is
    competitive on its own.
+   **⚠️ This inverted in Phase 2.** Under unknown pose, on the organizers' *real*
+   sample, the classical path localized 15/16 present pairs (35.60/40) while the
+   learned path managed 7/16 (13.35/40) — so classical is what ships. See §4.
 5. **A third, unseen generator is the real open risk.** Our own-generator net
    scored only 71 % on the organizers' data before union training — the
    cross-generator gap is real and was measured, not assumed. Union training
    plus the classical fallback are hedges against it, not proofs.
-6. **RGB optical images (the +10 bonus) are not implemented.** The renderer and
-   both matchers are grayscale-only. This was a deliberate scope decision, not
-   an oversight.
+6. ~~RGB optical images are not implemented.~~ **Superseded in Phase 2.** Set D
+   is handled: any non-grayscale input is converted to luminance (ITU-R 601) at
+   load time in `register.py` and fed to the same matcher, so the optical-RGB
+   bonus needs no matcher change and costs the grayscale path nothing
+   (Sets A/B/C are bit-identical either way). See §3.
 
 ---
 
 ## 10. References
 
-Principal sources; the full 24-source ledger with per-parameter attribution is
+Principal sources; the full 32-source ledger with per-parameter attribution is
 in [`docs/GENERATOR_SPEC.md`](docs/GENERATOR_SPEC.md).
 
 - J. P. Lewis, *Fast Normalized Cross-Correlation*, Vision Interface, 1995.
@@ -586,13 +698,27 @@ Reference generator and the ZNCC baseline compared against throughout:
 
 Developed on Windows 11, Ryzen 5 7535HS, RTX 3050 Laptop (4 GB VRAM), 16 GB RAM.
 
+**Graded on**: 4-core x86 CPU, 8 GB RAM, **no GPU, no network, Python 3.11**.
+
 | Path | Requirements |
 |---|---|
-| Classical + generator | numpy 2.5.1, scipy 1.18.0, pillow 12.3.0 — **no GPU** |
-| Learned + router | additionally torch ≥ 2.4 (built against 2.5.1+cu121) |
+| **Shipped Phase 2 path** (classical + generator) | `numpy>=1.26,<3`, `scipy>=1.11,<2`, `pillow>=10.0,<14` — **no GPU, no torch** |
+| Learned path (optional, off by default) | additionally torch ≥ 2.4 — training only |
 
-A CPU-only torch build works and is slower; with no torch at all, `infer.py`
-still runs via the classical path.
+`pip install -r requirements.txt` yields a **torch-free** environment; with no
+torch at all `register.py` runs the classical path unchanged.
+
+> **Why ranges and not exact pins.** The requirements originally carried exact
+> versions from `pip freeze` on a Python **3.12** development box. Two of them
+> (`numpy 2.5.1`, `scipy 1.18.0`) are 3.12-only — `numpy 2.5.1` declares
+> `Requires-Python >=3.12` — so `pip install -r requirements.txt` **failed
+> outright on a clean 3.11 environment**, the reference machine's version. Every
+> accuracy figure in this repo stayed true while the install itself was broken;
+> it was invisible because all prior verification ran on 3.12. Replaced with
+> ranges and re-verified end-to-end on Python 3.11: the install succeeds and the
+> prediction file is **byte-identical** to the 3.12 run. An environment
+> assumption is a failure mode, and must be tested on the target version —
+> see [`failure_analysis.pdf`](failure_analysis.pdf) §5.
 
 ---
 
