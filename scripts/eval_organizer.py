@@ -39,6 +39,47 @@ def credit(err_px: float) -> float:
     return 0.00
 
 
+# Pose and calibration tiers, identical to scripts/score_phase2.py. Duplicated
+# rather than imported so this script stays a single self-contained file a
+# reviewer can read top to bottom.
+
+def scale_credit(pct_err: float) -> float:
+    for thr, cr in ((1.0, 1.0), (2.0, 0.6), (5.0, 0.3)):
+        if pct_err <= thr:
+            return cr
+    return 0.0
+
+
+def rot_credit(deg_err: float) -> float:
+    for thr, cr in ((0.25, 1.0), (0.5, 0.6), (1.0, 0.3)):
+        if deg_err <= thr:
+            return cr
+    return 0.0
+
+
+def auc(scores, labels) -> float:
+    """AUROC via the rank-sum (Mann-Whitney U) identity, no sklearn dependency."""
+    scores = np.asarray(scores, float)
+    labels = np.asarray(labels, int)
+    order = np.argsort(scores)
+    ranks = np.empty(len(scores), float)
+    ranks[order] = np.arange(1, len(scores) + 1)
+    ss = scores[order]
+    i = 0                                   # average ranks within tie groups
+    while i < len(ss):
+        j = i
+        while j + 1 < len(ss) and ss[j + 1] == ss[i]:
+            j += 1
+        if j > i:
+            ranks[order[i:j + 1]] = ranks[order[i:j + 1]].mean()
+        i = j + 1
+    n_pos = int(labels.sum())
+    n_neg = len(labels) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/organizer_sample")
@@ -98,6 +139,23 @@ def main():
     fn = sum(1 for r in rows if r["present"] == 1 and r["found"] == 0)
     f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) else 0.0
 
+    # --- pose (20): scale 10 + rotation 10 ---
+    # Scored only where localization already succeeded ("a pose on the wrong tile
+    # is noise"), and only over the grayscale sets: p019/p020 are Set D, which is
+    # the RGB bonus and is not part of the 180-pair pose pool.
+    posed = [r for r in present_rows
+             if r["found"] == 1 and credit(r["err"]) > 0 and r["pid"] <= "p014"]
+    sc = [scale_credit(abs(r["scale"] - r["gt_scale"]) / r["gt_scale"] * 100.0)
+          for r in posed]
+    rc = [rot_credit(abs(r["theta"] - r["gt_theta"])) for r in posed]
+    scale_pts = float(np.mean(sc)) * 10.0 if sc else 0.0
+    rot_pts = float(np.mean(rc)) * 10.0 if rc else 0.0
+
+    # --- calibration (10): AUC of `score` against per-pair correctness ---
+    correct = [int(r["found"] == 1 and r["err"] <= 5.0) if r["present"]
+               else int(r["found"] == 0) for r in rows]
+    a_uc = auc([r["score"] for r in rows], correct)
+
     if not args.quiet:
         print(f"{'id':6} {'gtP':3} {'fnd':3} {'err_px':>8} {'credit':>6} "
               f"{'scale(rec/gt)':>16} {'theta(rec/gt)':>16}")
@@ -113,6 +171,11 @@ def main():
     print(f"Localization /40      : {loc40:.2f}   (SetA mean {mA:.3f}, SetB mean {mB:.3f})")
     print(f"Present within 5px    : {within5}/{len(present_rows)}")
     print(f"Rejection F1(present+): {f1:.3f}   (TP {tp} FP {fp} FN {fn})")
+    print(f"Pose scale /10        : {scale_pts:.2f}   "
+          f"(mean credit {float(np.mean(sc)) if sc else 0:.3f} over {len(sc)} localized, Sets A/B)")
+    print(f"Pose rotation /10     : {rot_pts:.2f}   "
+          f"(mean credit {float(np.mean(rc)) if rc else 0:.3f} over {len(rc)} localized, Sets A/B)")
+    print(f"Calibration AUC /10   : {(0.0 if np.isnan(a_uc) else a_uc)*10:.2f}   (AUC {a_uc:.3f})")
     print(f"Median time/pair      : {np.median(times)*1000:.0f} ms")
 
 
