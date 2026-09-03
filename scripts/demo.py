@@ -69,5 +69,3 @@ per = (time.time() - t0) / len(rows) * 1000
 print(f"\n   within 5 px : {int((e<=5).sum())}/{len(e)}  =  {100*(e<=5).mean():.1f} %")
 print(f"   median error: {np.median(e):.2f} px       worst: {e.max():.2f} px")
 print(f"   speed       : {per:.0f} ms/pair")
-print("\n   On the organizers' own 200-pair reference set: 94.5 % within 5 px,")
-print("   versus 75.5 % for their provided ZNCC baseline.\n")
