@@ -491,13 +491,27 @@ predict_net.py                    Phase 1 CLI — learned only
 predict_router.py                 Phase 1 CLI — router, batch mode
 fmt_pose.py                       Fourier-Mellin experiment — measured and rejected
 
+TheTGuys_PS02_SUBMIT.pptx         Phase 1 submission deck (provenance)
+gen_chunks.sh                     Phase 1 helpers: chunked generation, overnight
+overnight.sh                      training, union-set training. Kept for the
+union_train.sh                    record; none is used by register.py.
+gen_log.txt  overnight_log.txt    their run logs
+union_log.txt  union_log2.txt
+
 driftmatch/                     the learned matcher
   model.py                        Siamese encoder + learned NCC + centre-point head
   data.py                         dataset, memmap cache, augmentation
   train.py                        training loop (fp16, chunked, resumable)
   infer.py                        heatmap → (x, y)
   checkpoints/
-    best.pt                     ★ shipped generalist  (94.5 % / 86 %)
+    best_phase2_speckle.pt      ★ the checkpoint register.py loads — Phase 2,
+                                  scale + aberrations + speckle/impulse noise.
+                                  Loaded but NOT consulted for x,y: the net is
+                                  off by default (see §4), so it does not affect
+                                  the shipped six columns.
+    best_phase2_rot8k.pt          its predecessor (wider rotation coverage)
+    best_phase2.pt                first Phase 2 net (scale + aberrations)
+    best.pt                       Phase 1 shipped generalist  (94.5 % / 86 %)
     best_theirs_domain.pt         single-generator specialist (95.5 % / 84 %)
     best_generalist.pt            earlier generalist (epoch 18)
     best_ourdomain.pt             our-generator-only net (ablation)
@@ -508,7 +522,7 @@ driftsense/                     the nm-scale SEM renderer
   physics.py                      SEM image-formation model
   sampling.py                     seed → fully-specified pair
 
-scripts/                        evaluation, verification, calibration (24 utilities)
+scripts/                        evaluation, verification, calibration (35 utilities)
 docs/                           problem analysis, generator spec, webinar notes
 data/
   curated30/                      30 showcase cases + CASES.md  (images included)
@@ -531,12 +545,20 @@ Their 20-pair sample is **not** redistributed here (it is their material), so
 point `--data` at your own copy:
 
 ```bash
-# the shipped classical configuration -> localization 35.60/40, rejection F1 0.968
+# the shipped classical configuration -> reproduces the whole headline table:
+# localization 35.60/40, rejection F1 0.968, scale 8.62/10, rotation 10/10, AUC 0.789
 python scripts/eval_organizer.py --data data/organizer_sample
 
 # the same sample with the net supplying x,y -> 13.35/40 (the measured regression)
 python scripts/eval_organizer.py --data data/organizer_sample --use-net-xy
 ```
+
+Pose is scored only where localization already succeeded, and only over the
+grayscale sets — `p019`/`p020` are Set D, the RGB bonus, not part of the pose
+pool — which is why its 13 pairs are fewer than localization's 16. The
+`Median time/pair` this prints is whatever machine you run it on; the 3.6 s in
+the headline table is the separately measured **reference profile** figure
+(4 cores, 8 GB, Python 3.11, 200 pairs), not this line.
 
 To score any generated set under the full Phase 2 rubric (localization, pose,
 rejection, calibration):
